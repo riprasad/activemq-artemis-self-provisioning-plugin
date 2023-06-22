@@ -1,109 +1,42 @@
-name: CI
+name: Release
 
 env:
   IMAGE_NAME: activemq-artemis-self-provisioning-plugin
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  schedule:
-    - cron: '6 0 * * *'
+    tags:
+      - 'v*'
   workflow_dispatch:
-   inputs:
-     snapshot:
-       description: 'Snapshot'
-       required: false
-       default: false
-       type: boolean
-
-# cancels the old active workflow if new workflow is triggered
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 jobs:
-  analyze:
-    name: Analyze
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-
-    strategy:
-      fail-fast: false
-      matrix:
-        language: ['javascript']
-        # CodeQL supports [ 'cpp', 'csharp', 'go', 'java', 'javascript', 'python', 'ruby' ]
-        # Learn more about CodeQL language support at https://aka.ms/codeql-docs/language-support
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      # Initializes the CodeQL tools for scanning.
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v2
-        with:
-          languages: ${{ matrix.language }}
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v2
-
   build:
-    name: Build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout the repo
         uses: actions/checkout@v3
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: 16.6.2
-
-      - name: Get cache and install dependencies
-        uses: ./.github/actions/cache-restore
-
-      - name: Build project
-        run: yarn run build
-
-      # TODO: uncomment after adding tests
-      # - name: Execute tests
-      #   run: yarn run test
-
-      - name: Check for uncommited changes
-        run: git diff --quiet --exit-code
-
-      # TODO: uncomment after fixing storybook issue: https://github.com/openshift/dynamic-plugin-sdk/issues/216
-      # - name: Build storybook
-      #   run: |
-      #     yarn run build-storybook -- --quiet --loglevel silent
-
-      # - name: Deploy story book to github pages 🚀
-      #   uses: JamesIves/github-pages-deploy-action@v4.4.0
-      #   with:
-      #     branch: gh-pages # The branch the action should deploy to.
-      #     folder: storybook-static # The folder the action should deploy.
-
-      - name: Update the image
-        if: ${{inputs.snapshot}}
+      - name: Create release tag
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
-          PLUGIN_IMAGE="quay.io/${{ secrets.QUAY_NAMESPACE }}/activemq-artemis-self-provisioning-plugin@$(skopeo inspect docker://quay.io/${{ secrets.QUAY_NAMESPACE }}/activemq-artemis-self-provisioning-plugin:snapshot | jq -r '.Digest')"
-          sed -i "s~FROM.*~FROM ${PLUGIN_IMAGE}~g" Dockerfile
+          git fetch --tags
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+          RELEASE_TAG="$(cat package.json | jq -r '.version')"
+          RELEASE_TAG_COMMIT="$(git rev-list -n 1 ${RELEASE_TAG} || true)"
+          if [ "$RELEASE_TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+            git config user.name 'artemiscloud-bot'
+            git config user.email 'bot@artemiscloud.io'
+            git tag -a ${RELEASE_TAG} -m ${RELEASE_TAG} --force
+            git push origin $RELEASE_TAG --force
+          fi
 
       - name: Set outputs
         id: vars
         run: | 
-         echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-         echo "date=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
-
+         echo "image_tag=$(git describe --exact-match --tags | sed 's/v//')" >> $GITHUB_OUTPUT
       - name: Check outputs
         run: | 
-         echo ${{ steps.vars.outputs.sha_short }}
-         echo ${{ steps.vars.outputs.date }}
+         echo ${{ steps.vars.outputs.image_tag }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
@@ -111,47 +44,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      # So now you can use Actions' own caching!
-      - name: Cache Docker layers
-        uses: actions/cache@v2
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
-
       - name: Login to image repository quay.io
-        # Only login if not a PR, as PRs only trigger a Docker build and not a push
-        if: ${{ github.event_name != 'pull_request' }}
         uses: docker/login-action@v2
         with:
           registry: quay.io
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_PASSWORD }}
 
-      - name: Build and Push the dev image
+      - name: Build and Push the image
         uses: docker/build-push-action@v4
         with:
           context: .
           file: ./Dockerfile
-          # If this is a PR, we only build for AMD64. For PRs we only do a sanity check test to ensure Docker builds  work.
-          # If this is not a PR (e.g. a tag or merge commit), also build for ARM64
-          platforms: linux/amd64${{github.event_name!='pull_request' && ',linux/arm64' || ''}}
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ secrets.QUAY_NAMESPACE }}/${{env.IMAGE_NAME}}:dev.latest, ${{ secrets.QUAY_NAMESPACE }}/${{env.IMAGE_NAME}}:dev.${{ steps.vars.outputs.date }}.${{ steps.vars.outputs.sha_short }}
-          labels: |
-            quay.expires-after=90d
-            git-sha=$GITHUB_SHA
-
-      - name: Push the snapshot image
-        if: ${{ github.event_name == 'schedule' || inputs.snapshot }}
-        run: >
-          docker login --username=${{ secrets.QUAY_USERNAME }} --password=${{ secrets.QUAY_PASSWORD }} quay.io &&
-          docker tag $IMAGE_NAME:latest quay.io/${{ secrets.QUAY_NAMESPACE }}/$IMAGE_NAME:snapshot &&
-          docker push quay.io/${{ secrets.QUAY_NAMESPACE }}/$IMAGE_NAME:snapshot
-      - name: Move cache
-        run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ secrets.QUAY_NAMESPACE }}/${{env.IMAGE_NAME}}:dev.latest, ${{ steps.vars.outputs.image_tag }}
