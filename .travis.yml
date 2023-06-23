@@ -1,0 +1,32 @@
+language: node_js
+node_js:
+  - 16.6.2
+
+services:
+  - docker
+
+cache:
+  directories:
+    - $HOME/.npm
+
+before_install:
+  - npm install -g yarn
+
+install:
+  - yarn install
+
+before_script:
+  - docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
+script:
+  - yarn run build
+
+jobs:
+  include:
+    - arch: amd64
+      script:
+        - docker build -t $IMAGE_NAME:$IMAGE_TAG --file ./Dockerfile .
+
+    - arch: arm64
+      script:
+        - docker build -t $IMAGE_NAME:$IMAGE_TAG --file ./Dockerfile .
