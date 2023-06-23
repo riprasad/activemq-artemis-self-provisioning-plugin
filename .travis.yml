@@ -30,3 +30,4 @@ jobs:
     - arch: arm64
       script:
         - docker build -t $IMAGE_NAME:$IMAGE_TAG --file ./Dockerfile .
+
